@@ -1,0 +1,62 @@
+
+<H1>Choose a Windows Update option.</H1>
+<table>
+	<tr>
+		<td>
+			<input type=radio id="NoUpdate" name="WinUpdate" value=No checked language=vbscript onclick=ValidateWindowsUpdate AccessKey=D>
+		</td>
+		<td>
+			<Label class="Larger"><u class=larger>D</u>on't install Windows updates.</Label>
+		</td>
+	</tr>
+	<tr>
+		<td></td>
+		<td>
+			<div>The operating system will be deployed but no updates will be installed.</div>
+		</td>
+	</tr>
+
+	<tr><td colspan=2>&nbsp;</td></tr>
+
+	<tr>
+		<td>
+			<input type=radio id="WinUpdates" name="WinUpdate" value=YES language=vbscript onclick=ValidateWindowsUpdate AccessKey=A>
+		</td>
+		<td>
+			<Label class="Larger">Install <u class=larger>a</u>ll Windows updates.</Label>
+		</td>
+	</tr>
+	<tr>
+		<td></td>
+		<td>
+			<div>The operating system will be deployed after which all available updates will be downloaded from the Windows Update site and installed.</div>
+		</td>
+	</tr>
+
+	<tr><td colspan=2>&nbsp;</td></tr>
+
+
+	<tr>
+		<td>
+			<input type=radio id="WSUSUpdate" name="WinUpdate" value=YES language=vbscript onclick=ValidateWindowsUpdate AccessKey=U>
+		</td>
+		<td>
+			<Label class="Larger">Install <u class=larger>u</u>pdates from a WSUS server.</Label>
+		</td>
+	</tr>
+	<tr>
+		<td></td>
+		<td>
+			<div>The operating system will be deployed after which all available updates will be downloaded from a WSUS server and installed. Enter the appropriate WSUS server using the field below.</div>
+			<br>
+			<div><u>W</u>SUS server URL (http://servername:8530):</div>
+			<input type=text value="http://SVR-WSUS.yourdomain.local:8530" id="WSUSServer" name=WSUSServer size=30 AccessKey=W>
+			<label class=ErrMsg for=WSUSServer>* Required</label>&nbsp;
+			<div>WSUS <u>T</u>arget Group name (optional):</div>
+			<input type=text id="TargetGroup" name=TargetGroup size=30 AccessKey=T>
+		</td>
+	</tr>
+
+	<tr><td colspan=2>&nbsp;</td></tr>
+
+</table>
