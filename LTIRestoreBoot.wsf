@@ -1,0 +1,192 @@
+<job id="LTIRestoreBoot">
+	<script language="VBScript" src="ZTIUtility.vbs"/>
+	<script language="VBScript" src="ZTIBCDUtility.vbs"/>
+'	<script language="VBScript" src="ZTIConfigFile.vbs"/>
+'	<script language="VBScript" src="ZTIDiskUtility.vbs"/>
+	<script language="VBScript">
+
+' // ***************************************************************************
+' // 
+' // Copyright (c) Microsoft Corporation.  All rights reserved.
+' // 
+' // Microsoft Deployment Toolkit Solution Accelerator
+' //
+' // File:      LTIRestoreBoot.wsf
+' // 
+' // Version:   6.3.8298.1000
+' // 
+' // Purpose:   Remove WinPE and restore boot to local OS after sysprep & capture.
+' // 
+' // Usage:     cscript.exe [//nologo] LTIRestoreBoot.wsf [/debug:true]
+' // 
+' // Author: 	Michaja van der Zouwen
+' // 
+' // ***************************************************************************
+
+Option Explicit
+Dim oLTIRestoreBoot
+Dim iScriptRC
+
+If Not oUtility.Arguments.Exists("DebugCapture") Then
+	On Error Resume Next
+End If
+
+Set oLTIRestoreBoot = New LTIRestoreBoot
+TestAndFail SUCCESS, 10000, "Create object: Set oLTIRestoreBoot = New LTIRestoreBoot"
+
+iScriptRc =  oLTIRestoreBoot.Main
+ProcessResults iScriptRc
+Wscript.quit iScriptRc
+
+'//----------------------------------------------------------------------------
+'//  Main Class
+'//----------------------------------------------------------------------------
+
+Class LTIRestoreBoot
+
+	Dim iErrors
+	Dim iWarnings
+	Dim sBuffer
+	Dim bFirst
+
+	'//----------------------------------------------------------------------------
+	'//  Main routine
+	'//----------------------------------------------------------------------------
+
+	Function Main
+	
+		Dim iRetVal, iRC
+		Dim sCmd
+		Dim arrDrives
+		Dim i
+		Dim sSystemDrive
+		Dim sArchiveDir
+		Dim oUnattend
+		Dim oNode
+		Dim sBootsect
+		Dim bOEM
+		Dim sproc
+		Dim sBDDUtility
+		Dim sMaxSize
+		Dim oResults
+		Dim sLTIBootstrap
+
+		' Get the deployment system drive
+
+		sSystemDrive = "C:"
+		For each oDrive in oFSO.Drives
+			If oDrive.DriveType = 2 then
+				If oDrive.IsReady Then
+					If (oFSO.FolderExists(oDrive.DriveLetter & ":\Windows") or oFSO.FolderExists(oDrive.DriveLetter & ":\Winnt")) and oDrive.DriveLetter<>"X" then
+						sSystemDrive = oDrive.DriveLetter & ":"
+						oLogging.CreateEntry "Property SystemDrive is now = " & sSystemDrive, LogTypeInfo
+						Exit For
+					End if
+				End If
+			End if
+		Next
+
+		bOEM = ucase(oEnvironment.Item("_DoNotCleanLiteTouch")) = "TRUE"
+
+		
+		' Figure out what directory to use
+
+		If oEnvironment.Item("OSVersion") = "WinPE" then
+			sArchiveDir = sSystemDrive & "\WINDOWS\TEMP"
+		Else
+			If sSystemDrive = oEnv("SystemDrive") then
+				sArchiveDir = oEnv("SystemRoot") & "\TEMP"
+			Else
+				sArchiveDir = sSystemDrive & "\WINDOWS\TEMP"
+			End if
+		End if
+
+		' Clean up Ramdisk entry
+
+		If BCDObjectExistsNoOutput(BDD_RAMDISK_GUID) then
+			RunBCDEdit "/delete " & BDD_RAMDISK_GUID & " /cleanup"
+			oLogging.CreateEntry "Removing BCDEdit", LogTypeInfo
+		End if 
+
+		'//----------------------------------------------------------------------------
+		'//  Clean up the Windows PE image
+		'//----------------------------------------------------------------------------
+
+		If bOEM then
+
+			oLogging.CreateEntry "No Windows PE image to delete (OEM Scenario).", LogTypeInfo
+
+		Elseif oFSO.FileExists(sSystemDrive & "\sources\boot.wim") then
+
+			' First remove the BOOT.WIM
+			oLogging.CreateEntry "Removing file " & sSystemDrive & "\sources\boot.wim", LogTypeInfo
+			DeleteFile sSystemDrive & "\sources\boot.wim"
+
+
+			' Now if the sources folder is empty, remove it too.
+
+			If oFSO.GetFolder(sSystemDrive & "\sources").Files.Count = 0 and oFSO.GetFolder(sSystemDrive & "\sources").Subfolders.Count = 0 then
+				oLogging.CreateEntry "Removing folder " & sSystemDrive & "\sources", LogTypeInfo
+				RemoveFolder sSystemDrive & "\sources"
+			Else
+				oLogging.CreateEntry "The " & sSystemDrive & "\sources folder is not empty, not removing.", LogTypeInfo
+			End if
+
+		Else
+
+			oLogging.CreateEntry "No Windows PE image to delete.", LogTypeInfo
+
+		End if
+		
+		' Use DISM to apply the unattend.xml settings, perform servicing, etc.
+		
+		'ApplyUnattend(sSystemDrive)
+		
+		If oFSO.FileExists(sSystemDrive & "\minint\unattend.xml") and oFSO.FolderExists(sSystemDrive & "\windows\panther") then
+			oLogging.CreateEntry "Copying unattend file to panther folder", LogTypeInfo
+			oFSO.CopyFile sSystemDrive & "\minint\unattend.xml", sSystemDrive & "\windows\panther\unattend.xml", true
+		End If
+		
+		' Make sure the LTIBootstrap.vbs script is copied to the root of the drive
+
+		If not oFSO.FileExists(sSystemDrive & "\LTIBootstrap.vbs") then
+			iRC = oUtility.FindFile("LTIBootstrap.vbs", sLTIBootstrap)
+			oFSO.CopyFile sLTIBootstrap, sSystemDrive & "\LTIBootstrap.vbs"
+		End if
+		
+		' Reset BootDrive variable for second run of LTIApply (line 235)
+		
+		oLogging.CreateEntry "Resetting BootDrive variable", LogTypeInfo
+		oEnvironment.item("BootDrive") = ""
+		
+		Main = Success
+		
+	End function
+	
+	
+	'//----------------------------------------------------------------------------
+	'//  Local methods
+	'//----------------------------------------------------------------------------
+
+
+	Function RemoveFolder(sPath)
+		RemoveFolder = oFileHandling.RemoveFolderEx(sPath, oLogging.Debug)
+	End Function
+	
+	Function DeleteFile(sFile)
+		DeleteFile = oFileHandling.DeleteFileEx(sFile,oLogging.Debug)
+	End function
+
+	Function BCDObjectExistsNoOutput ( sGUID )
+		BCDObjectExistsNoOutput = false
+		on error resume next
+		oShell.Run "cmd.exe /c bcdedit.exe /enum " & sGUID & " > %temp%\bcdtest.txt", 0, True
+		oShell.Run "cmd.exe /c bcdedit.exe /enum " & sGUID & " /V >> %temp%\bcdtest.txt", 0, True
+		BCDObjectExistsNoOutput = instr(1,oFSO.OpenTextFile(oShell.ExpandEnvironmentStrings("%temp%\bcdtest.txt")).ReadAll,sGUID,vbTExtCompare) <> 0
+		on error goto 0
+	End function 
+
+End class
+
+	</script>
+</job>
