@@ -138,10 +138,6 @@ Class LTIRestoreBoot
 
 		End if
 		
-		' Use DISM to apply the unattend.xml settings, perform servicing, etc.
-		
-		'ApplyUnattend(sSystemDrive)
-		
 		If oFSO.FileExists(sSystemDrive & "\minint\unattend.xml") and oFSO.FolderExists(sSystemDrive & "\windows\panther") then
 			oLogging.CreateEntry "Copying unattend file to panther folder", LogTypeInfo
 			oFSO.CopyFile sSystemDrive & "\minint\unattend.xml", sSystemDrive & "\windows\panther\unattend.xml", true
@@ -154,9 +150,9 @@ Class LTIRestoreBoot
 			oFSO.CopyFile sLTIBootstrap, sSystemDrive & "\LTIBootstrap.vbs"
 		End if
 		
-		' Reset BootDrive variable for second run of LTIApply (line 235)
+		' Clearing BootDrive variable for second run of LTIApply (line 235)
 		
-		oLogging.CreateEntry "Resetting BootDrive variable", LogTypeInfo
+		oLogging.CreateEntry "Clearing BootDrive variable", LogTypeInfo
 		oEnvironment.item("BootDrive") = ""
 		
 		Main = Success
