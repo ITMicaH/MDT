@@ -6,6 +6,7 @@
 .NOTES
    Author: Michaja van der Zouwen
    Date  : 13-01-2016
+   Tested: 1809,1909
 #>
 
 function Disable-Service
