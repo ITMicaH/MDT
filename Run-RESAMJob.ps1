@@ -63,7 +63,14 @@ $DBUser = $TSENV:RESAMDBUser
 $DBPwd = $TSENV:RESAMDBPassword
 $APIUser = $TSENV:RESAMAPIUser
 $APIPwd = $TSENV:RESAMAPIPassword
-$File = 'C:\RESAMJob.txt'
+If (Test-Path D:\MININT)
+{
+    $File = "D:\MININT\RESAM.txt"
+}
+elseif (Test-Path C:\MININT)
+{
+    $File = "C:\MININT\RESAM.txt"
+}
 
 #endregion Variables
 
@@ -93,7 +100,8 @@ function Refresh-SQLConnection
     }
     If ($RESAM_DB_Connection.State -ne 'Open')
     {
-        throw 'Unable to re-establish connection to SQL.'
+        Write-Error 'Unable to re-establish connection to SQL.' -ErrorAction Continue
+        exit 1
     }
 }
 
@@ -146,7 +154,47 @@ function New-MonitorEvent
         $XMLHTTPRequest.open('GET',"$TSEnv:EVENTSERVICE/MDTMonitorEvent/PostEvent?$Url",$false,"$TSEnv:USERDOMAIN\$TSEnv:USERID",$TSenv:USERPASSWORD)
         $XMLHTTPRequest.send()
     }
-    catch{}
+    catch
+    {
+        Write-Host "Failed to send Monitoring event. Step is: $StepName."
+    }
+}
+
+Function Telnet
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true,
+                   ValueFromPipeline=$true,
+                   ValueFromPipelineByPropertyName=$true)]
+        [Alias ('HostName','cn','Host','Computer')]
+        [String]
+        $ComputerName='localhost',
+
+        [Parameter(Mandatory=$true,
+            ValueFromPipeline=$true,
+            ValueFromPipelineByPropertyName=$true)]
+        [int32]
+        $Port,
+
+        [int32]
+        $Timeout = 10000
+    )
+
+    Process 
+    {
+        Try 
+        {
+            $TCP = New-Object System.Net.Sockets.TcpClient
+            $Connection = $TCP.BeginConnect($ComputerName, $Port, $null, $null)
+            $Connection.AsyncWaitHandle.WaitOne($timeout,$false)  | Out-Null 
+            return $TCP.Connected
+        }
+        Catch
+        {
+            Write-Error "Unknown Error: $_"
+        }
+    }
 }
 
 #endregion functions
@@ -159,37 +207,89 @@ If (!$RunBookName -and !$AgentName)
 }
 If ($AgentName -eq $env:COMPUTERNAME)
 {
-    Write-Host 'Checking RES AM agent installation...'
-    If ($Agent = Get-WmiObject win32_product -Filter "Name LIKE 'RES ONE Automation % Agent'" -ErrorAction SilentlyContinue)
+    Write-Host 'Checking RES AM agent service...'
+    $Service = Get-Service RESWAS -ErrorAction Stop
+    If ($Service.Status -eq 'Running')
     {
-        Write-Host "$($Agent.Name) is installed"
-        Write-Host 'Checking RES AM agent service...'
-        $Service = Get-Service RESWAS -ErrorAction SilentlyContinue
-        If ($Service.Status -eq 'Running')
-        {
-            Write-Host 'Service is running.'
-        }
-        else
-        {
-            Write-Host 'Service not running!`nStarting service...'
-            Start-Service RESWAS -ea Stop
-            Write-Host 'Service started.'
-        }
+        Write-Host 'Service is running.'
     }
     else
     {
-        throw 'Failed to find Agent installation.'
+        Write-Host "Service not running!`nStarting service..."
+        Start-Service RESWAS -ea Stop
+        Write-Host 'Service started.'
     }
 }
 Import-Module RESAM -ea 1
 
-Write-Host 'Connecting to RES AM environment...'
+Write-Host "Connecting to RES AM environment database '$DBName' on server '$DBServer'..."
 $PW = ConvertFrom-Base64 $DBPwd
 $password = $PW | ConvertTo-SecureString -AsPlainText -Force
 $cred = New-Object -typename System.Management.Automation.PSCredential -argumentlist $DBUser, $password
 Connect-RESAMDatabase -DataSource $DBServer -DatabaseName $DBName -Credential $cred -ea 1
 Write-Host "Connection established."
 $WarningPreference = 'SilentlyContinue'
+If ($AgentName)
+{
+    Write-Host 'Retreiving Agent object...'
+    for ($i = 0; $i -le 30; $i++)
+    { 
+        $Agent = Get-RESAMAgent -Name $AgentName -Full
+        if ($Agent.count -gt 1)
+        {
+            Write "Multiple agents found. Checking status..."
+            $Online = $Agent.Where{$_.Status -eq 'Online'}
+            If ($Online.count -gt 1)
+            {
+                Write-Error "There are $($Agent.count) agents online named '$AgentName'." -ErrorAction Continue
+                exit 1
+            }
+            elseif ($Online)
+            {
+                Write "Agent '$AgentName' is online."
+                $Agent = $Online
+                break
+            }
+            else
+            {
+                Write "Agent '$AgentName' is not online (yet). Waiting... (pass $i)"
+            }
+        }
+        elseif ($Agent.Status -ne 'Online')
+        {
+            Write "Agent '$AgentName' is not online (yet). Waiting... (pass $i)"
+        }
+        elseif ($Agent)
+        {
+            Write "Agent '$AgentName' is online."
+            break
+        }
+        else
+        {
+            Write "Agent '$AgentName' not found. Waiting... (pass $i)"
+        }
+        sleep -s 2
+    }
+
+    if ($Agent -and $Agent.Status -ne 'Online')
+    {
+        Write-Host "Agent '$AgentName' is still offline.`nRestarting agent service..."
+        Restart-Service RESWAS -ErrorAction stop
+        Write-Host 'Service restarted. Waiting 10 seconds'
+        Start-Sleep -Seconds 10
+        $Agent = Get-RESAMAgent -Name $AgentName
+        If ($Agent.Status -ne 'Online')
+        {
+            Write-Error "Agent '$AgentName' is still offline. Exiting script." -ErrorAction Continue
+            exit 1
+        }
+    }
+    elseif (!$Agent)
+    {
+        Write-Error "Agent '$AgentName' is not present." -ErrorAction Continue
+        exit 1
+    }
+}
 
 #endregion Prerequisites
 
@@ -206,78 +306,61 @@ else # Schedule new RES AM Job
 {
     Write-Host "Starting script with Project/Runbook value '$ProjectName$RunBookName' and Parameters '$Parameters'..."
     Write-Progress -Activity "Running RES Automation Manager job" -Status "Scheduling job: '$ProjectName$RunBookName'" -percentComplete 0
-    If ($AgentName)
-    {
-        Write-Host 'Retreiving Agent and Project objects...'
-        for ($i = 0; $i -lt 30; $i++)
-        { 
-            $Agent = Get-RESAMAgent -Name $AgentName -Status Online
-            If ($Agent)
-            {
-                break
-            }
-            else
-            {
-                sleep -s 2
-            }
-        }
-
-        If (!$Agent)
-        {
-            throw "Unable to find agent '$AgentName' or agent is offline."
-        }
-        elseif ($Agent.count -gt 1)
-        {
-            throw "There are $($Agent.count) agents online named '$AgentName'."
-        }
-    }
+    
     If ($ModuleName)
     {
         $Module = Get-RESAMModule -Name $ModuleName
         If (!$Module)
         {
-            throw "Unable to find module '$ModuleName'."
+            Write-Error "Unable to find module '$ModuleName'." -ErrorAction Continue
+            exit 1
         }
         If ($Module.count -gt 1)
         {
-            throw "There are $($Module.count) modules named '$ModuleName'"
+            Write-Error "There are $($Module.count) modules named '$ModuleName'" -ErrorAction Continue
+            exit 1
         }
         $JobDescription = "$ModuleName (initiated by MDT)"
-        $Message = "Scheduling RES AM module '$ModuleName'..."
+        $Message = "Scheduling RES AM module '$ModuleName' using dispatcher $Dispatcher..."
     }
     ElseIf ($ProjectName)
     {
         $Project = Get-RESAMProject -Name $ProjectName
         If (!$Project)
         {
-            throw "Unable to find project '$ProjectName'."
+            Write-Error "Unable to find project '$ProjectName'." -ErrorAction Continue
+            exit 1
         }
         If ($Project.count -gt 1)
         {
-            throw "There are $($Project.count) projects named '$ProjectName'"
+            Write-Error "There are $($Project.count) projects named '$ProjectName'" -ErrorAction Continue
+            exit 1
         }
         $JobDescription = "$ProjectName (initiated by MDT)"
-        $Message = "Scheduling RES AM project '$ProjectName'..."
+        $Message = "Scheduling RES AM project '$ProjectName' using dispatcher $Dispatcher..."
     }
     elseif ($RunBookName)
     {
         $Runbook = Get-RESAMRunBook -Name $RunBookName -Full
         If (!$Runbook)
         {
-            throw "Unable to find runbook '$RunbookName'."
+            Write-Error "Unable to find runbook '$RunbookName'." -ErrorAction Continue
+            exit 1
         }
         If ($Runbook.count -gt 1)
         {
-            throw "There are $($Runbook.count) runbooks named '$RunBookName'"
+            Write-Error "There are $($Runbook.count) runbooks named '$RunBookName'" -ErrorAction Continue
+            exit 1
         }
         If (!$Agent -and 
             $Runbook.Properties.properties.jobs.job.properties.whoname -contains '' -and
             $Runbook.Properties.properties.jobs.job.properties.use_runbookparam -eq 'no')
         {
-            throw "Runbook '$RunBookName' requires an agent."
+            Write-Error "Runbook '$RunBookName' requires an agent." -ErrorAction 1
+            exit 1
         }
         $JobDescription = "$RunBookName (initiated by MDT)"
-        $Message = "Scheduling RES AM runbook '$RunBookName'..."
+        $Message = "Scheduling RES AM runbook '$RunBookName' using dispatcher $Dispatcher..."
     }
     Write-Host 'Objects received.'
 
@@ -300,15 +383,39 @@ else # Schedule new RES AM Job
     #Schedule the job
     If ($ModuleName)
     {
-        $Job = New-RESAMJob -Dispatcher $Dispatcher -Credential $ApiCred -Who $Agent -Module $Module -Parameters $ParamHash -Description $JobDescription -ea 1
+        try
+        {
+            $Job = New-RESAMJob -Dispatcher $Dispatcher -Credential $ApiCred -Who $Agent -Module $Module -Parameters $ParamHash -Description $JobDescription -ea 1
+        }
+        catch
+        {
+            Write-Error "Unable to schedule job. Error: $($_.exception)"
+            exit 1
+        }
     }
     elseif ($ProjectName)
     {
-        $Job = New-RESAMJob -Dispatcher $Dispatcher -Credential $ApiCred -Who $Agent -Project $Project -Parameters $ParamHash -Description $JobDescription -ea 1
+        try
+        {
+            $Job = New-RESAMJob -Dispatcher $Dispatcher -Credential $ApiCred -Who $Agent -Project $Project -Parameters $ParamHash -Description $JobDescription -ea 1
+        }
+        catch
+        {
+            Write-Error "Unable to schedule job. Error: $($_.exception)"
+            exit 1
+        }
     }
     elseif ($RunbookName)
     {
-        $Job = New-RESAMJob -Dispatcher $Dispatcher -Credential $ApiCred -Who $Agent -RunBook $Runbook -Parameters $ParamHash -Description $JobDescription -ea 1
+        try
+        {
+            $Job = New-RESAMJob -Dispatcher $Dispatcher -Credential $ApiCred -Who $Agent -RunBook $Runbook -Parameters $ParamHash -Description $JobDescription -ea 1
+        }
+        catch
+        {
+            Write-Error "Unable to schedule job. Error: $($_.exception)"
+            exit 1
+        }
     }
     
     #Save Job GUID in file
@@ -340,7 +447,8 @@ If ($ShowProgress)
         }
         else
         {
-            Write-Error "Unable to retreive masterjob with guid $TSEnv:RESAMJob. $_" -ErrorAction Stop
+            Write-Error "Unable to retreive masterjob with guid $TSEnv:RESAMJob. $_" -ErrorAction Continue
+            exit 1
         }
     }
     If ($MasterJob.IsProject)
@@ -362,7 +470,8 @@ If ($ShowProgress)
             }
             else
             {
-                Write-Error "Unable to retreive modules for masterjob. $_" -ErrorAction Stop
+                Write-Error "Unable to retreive modules for masterjob. $_" -ErrorAction Continue
+                exit 1
             }
         }
         $TaskGUIDs = $Enabled.properties.guid
@@ -393,7 +502,17 @@ If ($ShowProgress)
                         Write-Host "Processing Module: $($CurrentModule.Name) - Project at $($Task.percent -as [int])% completion."
                         #$tsenv:_SMSTSCurrentActionName = $CurrentModule.Name
                         Write-Progress -Activity "Running RES Automation Manager job" -Status "Processing Module: $($CurrentModule.Name)" -percentComplete $Task.Percent
-                        New-MonitorEvent -EventID 41000 -Type Info -StepName $CurrentModule.Name -Message "Processing Module: $($CurrentModule.Name)"
+                        If ($TSEnv:EventService)
+                        {
+                            If (Telnet -ComputerName $TSEnv:EventService.Split(':')[1].TrimStart('//') -Port $TSEnv:EventService.Split(':')[2] -Timeout 1000 -ErrorAction SilentlyContinue)
+                            {
+                                New-MonitorEvent -EventID 41000 -Type Info -StepName $CurrentModule.Name -Message "Processing Module: $($CurrentModule.Name)"
+                            }
+                            else
+                            {
+                                Write-Host "Failed to contact Monitoring service at server [$($TSEnv:EventService.Split(':')[1].TrimStart('//'))] on port [$($TSEnv:EventService.Split(':')[2])]"
+                            }
+                        }
                     }
                 }
                 sleep -Seconds 3
@@ -407,11 +526,13 @@ If ($ShowProgress)
                 }
                 elseif (!$Job)
                 {
-                    Write-Error "Unable to retreive jobs from masterjob. $_" -ErrorAction Stop
+                    Write-Error "Unable to retreive jobs from masterjob. $_" -ErrorAction Continue
+                    exit 1
                 }
                 elseif (!$MasterJob)
                 {
-                    Write-Error "Unable to retreive masterjob with guid $($MasterJob.MasterJobGUID). $_" -ErrorAction Stop
+                    Write-Error "Unable to retreive masterjob with guid $($MasterJob.MasterJobGUID). $_" -ErrorAction Continue
+                    exit 1
                 }
             }
         }
@@ -466,7 +587,8 @@ If ($ShowProgress)
         Do
         {
             $MasterJob = Get-RESAMMasterJob -MasterJobGUID $MasterJob.MasterJobGUID -Full
-            $ActiveMasterJob = $MasterJob.Tasks.jobs.job | ?{$_.Status -eq 1} | Get-RESAMMasterJob -InvokedByRunbook -Full
+            $ActiveMasterJob = $MasterJob.Tasks.jobs.job | where Status -eq 1 | Foreach {
+                Get-RESAMMasterJob -MasterJobGUID $_.masterjobguid -InvokedByRunbook -Full}
             If ($ActiveMasterJob.IsProject)
             {
                 $ParentGUID = $ActiveMasterJob.Tasks.Tasks.task.projectinfo.guid
@@ -548,7 +670,7 @@ If ($ShowProgress)
         {
             'Completed'             {Write-host "RES AM Job '$Description' completed successfully."}
             'Completed with Errors' {Write-host "RES AM Job '$Description' completed successfully, but with some errors."}
-            'Failed'                {Disconnect-RESAMDatabase;Write-Error "RES AM Job '$Description' failed. Please check job results.";$host.SetShouldExit(1);exit}
+            'Failed'                {Disconnect-RESAMDatabase;Write-Error "RES AM Job '$Description' failed. Please check job results." -ErrorAction Continue;exit 1}
         }
     }
 }
